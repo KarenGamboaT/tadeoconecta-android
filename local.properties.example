@@ -1,0 +1,4 @@
+# Copia estas dos líneas al archivo local.properties del proyecto.
+# No pongas service_role, database password ni JWT secret aquí.
+SUPABASE_URL=https://TU-PROYECTO.supabase.co
+SUPABASE_KEY=sb_publishable_TU_CLAVE
