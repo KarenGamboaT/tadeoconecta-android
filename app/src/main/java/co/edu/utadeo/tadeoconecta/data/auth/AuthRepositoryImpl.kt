@@ -55,8 +55,25 @@ class AuthRepositoryImpl : AuthRepository {
         auth.resetPasswordForEmail(institutionalEmail(usernameOrEmail))
     }
 
+    override suspend fun verifyPasswordRecoveryOtp(usernameOrEmail: String, code: String) {
+        auth.verifyEmailOtp(
+            type = OtpType.Email.RECOVERY,
+            email = institutionalEmail(usernameOrEmail),
+            token = code
+        )
+    }
+
+    override suspend fun updatePassword(newPassword: String) {
+        auth.updateUser {
+            password = newPassword
+        }
+    }
+
     override suspend fun currentUserId(): String? =
         auth.currentUserOrNull()?.id
+
+    override suspend fun currentUserEmail(): String? =
+        auth.currentUserOrNull()?.email
 
     override suspend fun signOut() {
         auth.signOut()

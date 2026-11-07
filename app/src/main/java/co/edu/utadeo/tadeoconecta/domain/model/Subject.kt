@@ -16,3 +16,10 @@ data class ProfessorSubjectInsert(
     val subject_id: String,
     val active: Boolean = true
 )
+
+// Para leer qué asignaturas tiene marcadas un profesor ya registrado
+// (professor_subjects trae más columnas; solo nos interesa subject_id aquí).
+@Serializable
+data class ProfessorSubjectRow(
+    val subject_id: String
+)

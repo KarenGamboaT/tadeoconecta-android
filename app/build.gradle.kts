@@ -58,6 +58,11 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.compose.material3:material3")
+    // Íconos reales de Material (en vez de glifos de texto tipo "⌂"/"♡"/"⭐",
+    // que se ven distinto — a veces mal alineados o casi invisibles — según
+    // la fuente de cada teléfono). Mismo motivo que EditPencilIcon más abajo,
+    // pero para todos los demás íconos de la app.
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
@@ -67,7 +72,17 @@ dependencies {
     implementation(platform("io.github.jan-tennert.supabase:bom:3.5.0"))
     implementation("io.github.jan-tennert.supabase:auth-kt")
     implementation("io.github.jan-tennert.supabase:postgrest-kt")
+    implementation("io.github.jan-tennert.supabase:storage-kt")
+    // Puntos 1+2 de la lista de Juan — recomendaciones de mejora con IA: la
+    // app nunca llama directo a Gemini (la llave quedaría expuesta en el
+    // APK), llama a una Edge Function de Supabase (ver
+    // supabase/functions/generate-improvement-recommendations/) que sí
+    // tiene la llave como secreto del proyecto.
+    implementation("io.github.jan-tennert.supabase:functions-kt")
     implementation("io.ktor:ktor-client-android:3.0.3")
+
+    // Módulo 02 — foto de perfil: carga de la imagen desde Supabase Storage.
+    implementation("io.coil-kt:coil-compose:2.7.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
