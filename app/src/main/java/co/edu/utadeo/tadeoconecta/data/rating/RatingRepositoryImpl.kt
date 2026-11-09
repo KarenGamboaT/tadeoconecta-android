@@ -4,6 +4,7 @@ import co.edu.utadeo.tadeoconecta.core.network.SupabaseProvider
 import co.edu.utadeo.tadeoconecta.domain.model.AiRecommendation
 import co.edu.utadeo.tadeoconecta.domain.model.AiRecommendationsResponse
 import co.edu.utadeo.tadeoconecta.domain.model.AiReportVerdict
+import co.edu.utadeo.tadeoconecta.domain.model.AttendanceBands
 import co.edu.utadeo.tadeoconecta.domain.model.CategoryAnswers
 import co.edu.utadeo.tadeoconecta.domain.model.CategoryBreakdown
 import co.edu.utadeo.tadeoconecta.domain.model.CategoryNotes
@@ -45,7 +46,7 @@ import kotlinx.serialization.json.put
 // escribió qué.
 private val PUBLIC_RATING_COLUMNS = Columns.list(
     "id", "professor_id", "category_answers", "would_recommend", "recommend_for",
-    "workload", "attendance_mandatory", "grading_basis", "allows_review_of_exams",
+    "workload", "attendance_mandatory", "attendance_band", "grading_basis", "allows_review_of_exams",
     "class_style", "tip_comment", "hardest_part_comment", "reported", "created_at", "updated_at"
 )
 
@@ -78,6 +79,7 @@ class RatingRepositoryImpl(
         recommendFor: List<String>,
         workload: String,
         attendanceMandatory: Boolean,
+        attendanceBand: String,
         gradingBasis: String,
         allowsReviewOfExams: Boolean,
         classStyle: String,
@@ -98,6 +100,7 @@ class RatingRepositoryImpl(
                 recommend_for = recommendFor,
                 workload = workload,
                 attendance_mandatory = attendanceMandatory,
+                attendance_band = attendanceBand,
                 grading_basis = gradingBasis,
                 allows_review_of_exams = allowsReviewOfExams,
                 class_style = classStyle,
@@ -159,15 +162,24 @@ class RatingRepositoryImpl(
         return professorIds.associateWith { summaryFrom(rows[it].orEmpty()) }
     }
 
-    private fun summaryFrom(rows: List<ProfessorRatingRow>): ProfessorRatingSummary {
+    // Módulo 12 — cada reseña pesa según la asistencia que declaró quien la
+    // escribió (ver AttendanceBands): promedios y % que recomienda son
+    // PONDERADOS, y las de asistencia "mínima" (peso 0) se guardan pero no
+    // cuentan en nada de esto — ni en el conteo, ni en los datos rápidos, ni
+    // aparece su comentario. Las reseñas viejas (sin rango) pesan 1.0, así
+    // que para ellas todo da igual que antes.
+    private fun summaryFrom(allRows: List<ProfessorRatingRow>): ProfessorRatingSummary {
+        val rows = allRows.filter { AttendanceBands.weight(it.attendance_band) > 0.0 }
         if (rows.isEmpty()) return ProfessorRatingSummary.EMPTY
+        val rowWeights = rows.map { AttendanceBands.weight(it.attendance_band) }
+        val totalWeight = rowWeights.sum()
 
         val categoryAverages = RatingCategory.entries.associateWith { category ->
             val cards = RatingCards.byCategory.getValue(category)
-            val weights = rows.map { cards[it.category_answers.get(category)].weight }
+            val weightedSum = rows.indices.sumOf { i -> cards[rows[i].category_answers.get(category)].weight * rowWeights[i] }
             val counts = IntArray(4)
             rows.forEach { counts[it.category_answers.get(category)]++ }
-            CategoryBreakdown(average = weights.average(), cardCounts = counts.toList())
+            CategoryBreakdown(average = weightedSum / totalWeight, cardCounts = counts.toList())
         }
         val overall = categoryAverages.values.map { it.average }.average()
 
@@ -194,7 +206,7 @@ class RatingRepositoryImpl(
             reviewCount = rows.size,
             averageOverall = overall,
             categoryAverages = categoryAverages,
-            recommendPercent = (rows.count { it.would_recommend } * 100.0 / rows.size).toInt(),
+            recommendPercent = (rows.indices.sumOf { i -> if (rows[i].would_recommend) rowWeights[i] else 0.0 } * 100.0 / totalWeight).toInt(),
             recommendForCounts = rows.flatMap { it.recommend_for }.groupingBy { it }.eachCount(),
             workloadCounts = countBy { it.workload },
             attendanceMandatoryCount = rows.count { it.attendance_mandatory },
@@ -246,7 +258,9 @@ class RatingRepositoryImpl(
         categoryNotes: CategoryNotes,
         recommendReason: String,
         tipComment: String,
-        hardestPartComment: String
+        hardestPartComment: String,
+        question: String?,
+        attendanceLabel: String?
     ): ReviewModerationVerdict {
         val response = supabase.functions.invoke(
             function = "moderate-review-text",
@@ -255,6 +269,8 @@ class RatingRepositoryImpl(
                 put("recommend_reason", recommendReason.trim())
                 put("tip_comment", tipComment.trim())
                 put("hardest_part_comment", hardestPartComment.trim())
+                if (!question.isNullOrBlank()) put("pregunta", question)
+                if (!attendanceLabel.isNullOrBlank()) put("asistencia", attendanceLabel)
             },
             headers = Headers.build { append(HttpHeaders.ContentType, "application/json") }
         )
@@ -297,7 +313,8 @@ class RatingRepositoryImpl(
                     wouldRecommend = row.would_recommend,
                     recommendReason = row.recommend_reason,
                     tipComment = row.tip_comment,
-                    hardestPartComment = row.hardest_part_comment
+                    hardestPartComment = row.hardest_part_comment,
+                    attendanceBand = row.attendance_band
                 )
             }
     }
@@ -308,8 +325,22 @@ class RatingRepositoryImpl(
     // tiene la sesión activa, igual que Postgrest con las RPC de arriba),
     // así que nunca hace falta mandarle un professorId — ella decide quién
     // es "el profesor" del mismo modo que get_professor_feedback().
-    override suspend fun generateImprovementRecommendations(): List<AiRecommendation> {
-        val response = supabase.functions.invoke(function = "generate-improvement-recommendations")
-        return response.body<AiRecommendationsResponse>().recommendations
+    override suspend fun generateImprovementRecommendations(
+        updateReason: String?,
+        previousPlan: List<AiRecommendation>
+    ): AiRecommendationsResponse {
+        val response = if (updateReason.isNullOrBlank()) {
+            supabase.functions.invoke(function = "generate-improvement-recommendations")
+        } else {
+            supabase.functions.invoke(
+                function = "generate-improvement-recommendations",
+                body = buildJsonObject {
+                    put("motivo_actualizacion", updateReason.trim())
+                    put("plan_anterior", Json.encodeToJsonElement(previousPlan))
+                },
+                headers = Headers.build { append(HttpHeaders.ContentType, "application/json") }
+            )
+        }
+        return response.body<AiRecommendationsResponse>()
     }
 }

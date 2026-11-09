@@ -8,9 +8,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import co.edu.utadeo.tadeoconecta.data.auth.AuthRepositoryImpl
 import co.edu.utadeo.tadeoconecta.data.professor.ImprovementGoalRepositoryImpl
+import co.edu.utadeo.tadeoconecta.data.professor.ImprovementPlanRepositoryImpl
 import co.edu.utadeo.tadeoconecta.data.rating.RatingRepositoryImpl
 import co.edu.utadeo.tadeoconecta.domain.model.AiRecommendation
 import co.edu.utadeo.tadeoconecta.domain.model.AiReportVerdict
+import co.edu.utadeo.tadeoconecta.domain.model.ImprovementPlanRow
+import co.edu.utadeo.tadeoconecta.domain.model.PlanMath
+import co.edu.utadeo.tadeoconecta.domain.model.PlanProgress
 import co.edu.utadeo.tadeoconecta.domain.model.ProfessorFeedbackNote
 import co.edu.utadeo.tadeoconecta.domain.model.ProfessorGoalHistoryEntry
 import co.edu.utadeo.tadeoconecta.domain.model.ProfessorImprovementGoal
@@ -19,6 +23,7 @@ import co.edu.utadeo.tadeoconecta.domain.model.RatingCategory
 import co.edu.utadeo.tadeoconecta.domain.model.ReportReason
 import co.edu.utadeo.tadeoconecta.domain.repository.AuthRepository
 import co.edu.utadeo.tadeoconecta.domain.repository.ImprovementGoalRepository
+import co.edu.utadeo.tadeoconecta.domain.repository.ImprovementPlanRepository
 import co.edu.utadeo.tadeoconecta.domain.repository.RatingRepository
 import co.edu.utadeo.tadeoconecta.rating.MIN_REVIEWS_TO_SHOW_COMMENTS
 import kotlinx.coroutines.launch
@@ -86,8 +91,24 @@ data class ProfessorDashboardUiState(
     val aiRecommendations: List<AiRecommendation> = emptyList(),
     val aiLoading: Boolean = false,
     val aiError: String? = null,
+    // Módulo 12 — false cuando lo generado es solo "todavía pocas
+    // evaluaciones" (no se puede aceptar como plan).
+    val aiSufficient: Boolean = true,
+    // Razón que dio el profesor para el borrador actual (si es una
+    // actualización); se guarda junto con el plan al aceptarlo.
+    val aiUpdateReason: String? = null,
+    val updateDialogOpen: Boolean = false,
+    // Módulo 12 — plan ACEPTADO (vigente) y su historial permanente.
+    val activePlan: ImprovementPlanRow? = null,
+    val planHistory: List<ImprovementPlanRow> = emptyList(),
+    val planSaving: Boolean = false,
+    val planError: String? = null,
     val error: ProfessorDashboardError? = null
 ) {
+    // Avance del plan vigente contra las evaluaciones nuevas (las que
+    // llegaron después de aceptarlo) — null si no hay plan vigente.
+    val planProgress: PlanProgress? get() = activePlan?.let { PlanMath.progress(it, feedback) }
+
     // Mismo umbral que ReviewsScreen usa para los comentarios públicos: con
     // pocas evaluaciones, un promedio por categoría todavía no significa
     // nada estable como para señalarlo como "punto débil" o "punto fuerte".
@@ -106,13 +127,16 @@ private data class DashboardLoad(
     val summary: ProfessorRatingSummary,
     val feedback: List<ProfessorFeedbackNote>,
     val goal: ProfessorImprovementGoal?,
-    val history: List<ProfessorGoalHistoryEntry>
+    val history: List<ProfessorGoalHistoryEntry>,
+    val activePlan: ImprovementPlanRow?,
+    val planHistory: List<ImprovementPlanRow>
 )
 
 class ProfessorDashboardViewModel : ViewModel() {
     private val authRepository: AuthRepository = AuthRepositoryImpl()
     private val ratingRepository: RatingRepository = RatingRepositoryImpl(authRepository)
     private val goalRepository: ImprovementGoalRepository = ImprovementGoalRepositoryImpl(authRepository)
+    private val planRepository: ImprovementPlanRepository = ImprovementPlanRepositoryImpl()
 
     var state by mutableStateOf(ProfessorDashboardUiState())
         private set
@@ -149,14 +173,20 @@ class ProfessorDashboardViewModel : ViewModel() {
                 val feedback = ratingRepository.professorFeedback()
                 val goal = goalRepository.myGoal()
                 val history = goalRepository.history()
-                DashboardLoad(summary, feedback, goal, history)
+                // Módulo 12 — si por algo la tabla de planes todavía no
+                // existe, el panel igual carga (solo sin plan guardado).
+                val activePlan = runCatching { planRepository.activePlan() }.getOrNull()
+                val planHistory = runCatching { planRepository.history() }.getOrDefault(emptyList())
+                DashboardLoad(summary, feedback, goal, history, activePlan, planHistory)
             }.onSuccess { result ->
                 state = state.copy(
                     screen = ProfessorDashboardScreen.Home,
                     summary = result.summary,
                     feedback = result.feedback,
                     goal = result.goal,
-                    goalHistory = result.history
+                    goalHistory = result.history,
+                    activePlan = result.activePlan,
+                    planHistory = result.planHistory
                 )
             }.onFailure {
                 state = state.copy(screen = ProfessorDashboardScreen.Error, error = ProfessorDashboardError.LoadFailed)
@@ -252,25 +282,131 @@ class ProfessorDashboardViewModel : ViewModel() {
     // vez que cambia de pestaña, y si el intento automático falló tampoco
     // se reintenta solo en bucle — el profesor usa "Reintentar".
     fun ensureAiRecommendations() {
-        if (aiAutoRequested || state.aiRecommendations.isNotEmpty() || aiRequestInFlight) return
+        if (aiAutoRequested || state.activePlan != null || state.aiRecommendations.isNotEmpty() || aiRequestInFlight) return
         aiAutoRequested = true
         generateAiRecommendations()
     }
 
-    fun generateAiRecommendations() {
+    // reason != null cuando el profesor pidió ACTUALIZAR el plan explicando
+    // qué le faltó (Módulo 12): se manda junto con el plan anterior para que
+    // el nuevo lo atienda. "Reintentar" (sin reason) reusa la razón del
+    // borrador actual si la había.
+    fun generateAiRecommendations(reason: String? = null) {
         if (aiRequestInFlight) return
         aiRequestInFlight = true
-        state = state.copy(aiLoading = true, aiError = null)
+        val effectiveReason = reason?.trim()?.takeIf { it.isNotEmpty() } ?: state.aiUpdateReason
+        val previous = state.aiRecommendations.ifEmpty { state.activePlan?.recommendations.orEmpty() }
+        state = state.copy(aiLoading = true, aiError = null, updateDialogOpen = false, planError = null)
         viewModelScope.launch {
-            runCatching { ratingRepository.generateImprovementRecommendations() }
-                .onSuccess { recommendations -> state = state.copy(aiLoading = false, aiRecommendations = recommendations) }
+            runCatching { ratingRepository.generateImprovementRecommendations(effectiveReason, previous) }
+                .onSuccess { response ->
+                    state = state.copy(
+                        aiLoading = false,
+                        aiRecommendations = response.recommendations,
+                        aiSufficient = response.suficiente,
+                        aiUpdateReason = effectiveReason
+                    )
+                }
                 .onFailure {
+                    Log.e("ProfessorDashboardViewModel", "generateImprovementRecommendations() falló", it)
                     state = state.copy(
                         aiLoading = false,
                         aiError = "No pudimos preparar tu plan de mejora en este momento. Intenta de nuevo."
                     )
                 }
             aiRequestInFlight = false
+        }
+    }
+
+    // ---- Módulo 12 — aceptar el plan, avance, cierre de corte e historial ----
+
+    fun openUpdateDialog() { state = state.copy(updateDialogOpen = true) }
+    fun closeUpdateDialog() { state = state.copy(updateDialogOpen = false) }
+
+    // Descarta el borrador propuesto y vuelve a mostrar el plan vigente.
+    fun discardDraft() {
+        state = state.copy(aiRecommendations = emptyList(), aiUpdateReason = null, aiError = null, planError = null)
+    }
+
+    private var planActionInFlight = false
+
+    // "Aceptar plan": guarda las recomendaciones + una foto de los promedios
+    // de hoy (baseline) como el objetivo del próximo corte. Si ya había un
+    // plan vigente queda como "reemplazado" en el historial, nunca se borra.
+    fun acceptPlan() {
+        if (planActionInFlight || !state.aiSufficient || state.aiRecommendations.isEmpty()) return
+        planActionInFlight = true
+        val recommendations = state.aiRecommendations
+        val reason = state.aiUpdateReason
+        val baseline = PlanMath.baseline(state.feedback)
+        state = state.copy(planSaving = true, planError = null)
+        viewModelScope.launch {
+            runCatching {
+                planRepository.accept(recommendations, baseline, reason)
+                planRepository.activePlan() to planRepository.history()
+            }.onSuccess { (active, history) ->
+                state = state.copy(
+                    planSaving = false,
+                    activePlan = active,
+                    planHistory = history,
+                    aiRecommendations = emptyList(),
+                    aiUpdateReason = null
+                )
+            }.onFailure {
+                Log.e("ProfessorDashboardViewModel", "acceptPlan() falló", it)
+                state = state.copy(planSaving = false, planError = "No pudimos guardar tu plan. Intenta de nuevo.")
+            }
+            planActionInFlight = false
+        }
+    }
+
+    // Marca/desmarca "ya lo apliqué" en una acción del plan vigente.
+    fun toggleApplied(index: Int) {
+        val plan = state.activePlan ?: return
+        if (index !in plan.recommendations.indices) return
+        val previous = plan.applied.let { current ->
+            if (current.size == plan.recommendations.size) current else List(plan.recommendations.size) { current.getOrElse(it) { false } }
+        }
+        val updated = previous.toMutableList().also { it[index] = !it[index] }
+        state = state.copy(activePlan = plan.copy(applied = updated))
+        viewModelScope.launch {
+            runCatching { planRepository.setApplied(plan.id, updated) }
+                .onFailure {
+                    Log.e("ProfessorDashboardViewModel", "setApplied() falló", it)
+                    state = state.copy(activePlan = state.activePlan?.copy(applied = previous))
+                }
+        }
+    }
+
+    // Cierra el corte del plan vigente: compara contra las evaluaciones
+    // nuevas, guarda el resultado en el historial y propone un plan nuevo.
+    fun closeCut() {
+        if (planActionInFlight) return
+        val plan = state.activePlan ?: return
+        val progress = state.planProgress ?: return
+        planActionInFlight = true
+        val outcome = PlanMath.outcome(plan, progress)
+        state = state.copy(planSaving = true, planError = null)
+        viewModelScope.launch {
+            runCatching {
+                planRepository.close(plan.id, outcome)
+                planRepository.history()
+            }.onSuccess { history ->
+                state = state.copy(
+                    planSaving = false,
+                    activePlan = null,
+                    planHistory = history,
+                    aiRecommendations = emptyList(),
+                    aiUpdateReason = null
+                )
+                // Ya sin plan vigente: se propone uno nuevo para el siguiente corte.
+                aiAutoRequested = false
+                ensureAiRecommendations()
+            }.onFailure {
+                Log.e("ProfessorDashboardViewModel", "closeCut() falló", it)
+                state = state.copy(planSaving = false, planError = "No pudimos cerrar el corte. Intenta de nuevo.")
+            }
+            planActionInFlight = false
         }
     }
 

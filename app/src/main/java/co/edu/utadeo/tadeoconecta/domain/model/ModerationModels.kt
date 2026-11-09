@@ -43,5 +43,12 @@ data class AiReportVerdict(
 @Serializable
 data class ReviewModerationVerdict(
     val ofensivo: Boolean,
-    val motivo: String = ""
+    val motivo: String = "",
+    // Módulo 12 — solo se evalúa cuando la app manda la pregunta que el
+    // estudiante estaba contestando (revisión por paso). false = el texto no
+    // contesta esa pregunta (habla de otra cosa / es relleno / contradice lo
+    // que dijo de su asistencia). Con default true para que una respuesta de
+    // la versión anterior de la función (sin estos campos) siga funcionando.
+    val relevante: Boolean = true,
+    val sugerencia: String = ""
 )

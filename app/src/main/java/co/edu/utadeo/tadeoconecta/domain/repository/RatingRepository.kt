@@ -1,6 +1,7 @@
 package co.edu.utadeo.tadeoconecta.domain.repository
 
 import co.edu.utadeo.tadeoconecta.domain.model.AiRecommendation
+import co.edu.utadeo.tadeoconecta.domain.model.AiRecommendationsResponse
 import co.edu.utadeo.tadeoconecta.domain.model.AiReportVerdict
 import co.edu.utadeo.tadeoconecta.domain.model.CategoryAnswers
 import co.edu.utadeo.tadeoconecta.domain.model.CategoryNotes
@@ -28,6 +29,7 @@ interface RatingRepository {
         recommendFor: List<String>,
         workload: String,
         attendanceMandatory: Boolean,
+        attendanceBand: String,
         gradingBasis: String,
         allowsReviewOfExams: Boolean,
         classStyle: String,
@@ -76,7 +78,12 @@ interface RatingRepository {
         categoryNotes: CategoryNotes,
         recommendReason: String,
         tipComment: String,
-        hardestPartComment: String
+        hardestPartComment: String,
+        // Módulo 12 — solo en la revisión por paso: la pregunta que se está
+        // contestando y la asistencia declarada, para que la función también
+        // juzgue si la respuesta es coherente con la pregunta.
+        question: String? = null,
+        attendanceLabel: String? = null
     ): ReviewModerationVerdict
 
     // Módulo 08/09 — TODO lo que le han contestado al profesor AUTENTICADO,
@@ -96,5 +103,11 @@ interface RatingRepository {
     // mostrar si falla; NO hay caché local, cada llamada es una petición
     // nueva a propósito (ver el comentario en ProfessorDashboardViewModel
     // sobre por qué esto es a demanda y no automático).
-    suspend fun generateImprovementRecommendations(): List<AiRecommendation>
+    //
+    // Módulo 12 — al ACTUALIZAR un plan se manda la razón del profesor y el
+    // plan anterior para que el nuevo atienda lo que faltó.
+    suspend fun generateImprovementRecommendations(
+        updateReason: String? = null,
+        previousPlan: List<AiRecommendation> = emptyList()
+    ): AiRecommendationsResponse
 }

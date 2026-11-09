@@ -108,6 +108,9 @@ data class RatingFormState(
     val recommendFor: Set<String> = emptySet(),
     val workload: String? = null,
     val attendanceMandatory: Boolean? = null,
+    // Módulo 12 — asistencia declarada (ver AttendanceBands). Se pregunta al
+    // principio de la evaluación y decide cuánto pesa la reseña.
+    val attendanceBand: String? = null,
     val gradingBasis: String? = null,
     val allowsReviewOfExams: Boolean? = null,
     val classStyle: String? = null,
@@ -134,6 +137,7 @@ data class RatingFormState(
             isValidComment(recommendReason, MIN_RECOMMEND_REASON_WORDS) &&
             workload != null &&
             attendanceMandatory != null &&
+            attendanceBand != null &&
             gradingBasis != null &&
             allowsReviewOfExams != null &&
             classStyle != null &&
@@ -197,6 +201,7 @@ class RatingViewModel : ViewModel() {
             recommendFor = mine.recommend_for.toSet(),
             workload = mine.workload,
             attendanceMandatory = mine.attendance_mandatory,
+            attendanceBand = mine.attendance_band,
             gradingBasis = mine.grading_basis,
             allowsReviewOfExams = mine.allows_review_of_exams,
             classStyle = mine.class_style,
@@ -255,6 +260,7 @@ class RatingViewModel : ViewModel() {
 
     fun setWorkload(value: String) = updateForm { it.copy(workload = value) }
     fun setAttendanceMandatory(value: Boolean) = updateForm { it.copy(attendanceMandatory = value) }
+    fun setAttendanceBand(value: String) = updateForm { it.copy(attendanceBand = value) }
     fun setGradingBasis(value: String) = updateForm { it.copy(gradingBasis = value) }
     fun setAllowsReviewOfExams(value: Boolean) = updateForm { it.copy(allowsReviewOfExams = value) }
     fun setClassStyle(value: String) = updateForm { it.copy(classStyle = value) }
@@ -306,6 +312,7 @@ class RatingViewModel : ViewModel() {
                     recommendFor = form.recommendFor.toList(),
                     workload = form.workload!!,
                     attendanceMandatory = form.attendanceMandatory!!,
+                    attendanceBand = form.attendanceBand!!,
                     gradingBasis = form.gradingBasis!!,
                     allowsReviewOfExams = form.allowsReviewOfExams!!,
                     classStyle = form.classStyle!!,
@@ -346,18 +353,35 @@ class RatingViewModel : ViewModel() {
     // estudiante no debería trabarlo) — pero a diferencia de antes, ya no
     // se traga el error en silencio: RatingFormScreen lo muestra en
     // pantalla para poder diagnosticar sin tener que ir a Logcat.
-    suspend fun moderateStepText(text: String): StepModerationResult {
+    suspend fun moderateStepText(
+        text: String,
+        question: String? = null,
+        attendanceLabel: String? = null
+    ): StepModerationResult {
         if (text.isBlank()) return StepModerationResult.Clean
         return runCatching {
             ratingRepository.moderateReviewText(
                 categoryNotes = CategoryNotes.EMPTY,
                 recommendReason = "",
                 tipComment = text,
-                hardestPartComment = ""
+                hardestPartComment = "",
+                question = question,
+                attendanceLabel = attendanceLabel
             )
         }.fold(
             onSuccess = { verdict ->
-                if (verdict.ofensivo) StepModerationResult.Blocked(verdict.motivo) else StepModerationResult.Clean
+                when {
+                    verdict.ofensivo -> StepModerationResult.Blocked(verdict.motivo)
+                    // Módulo 12 — la respuesta no contesta la pregunta que se
+                    // hizo (habla de otra cosa, es relleno o contradice lo que
+                    // dijo de su asistencia). Se le pide reformularla.
+                    !verdict.relevante -> StepModerationResult.Blocked(
+                        verdict.sugerencia.ifBlank {
+                            "Tu respuesta no parece contestar esta pregunta. Cuéntanos con tus palabras lo que viviste en esta clase."
+                        }
+                    )
+                    else -> StepModerationResult.Clean
+                }
             },
             onFailure = { e ->
                 Log.e("RatingViewModel", "moderateStepText() falló; se deja pasar el paso", e)

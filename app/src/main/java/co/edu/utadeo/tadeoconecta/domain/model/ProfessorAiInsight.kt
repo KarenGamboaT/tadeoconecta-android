@@ -19,7 +19,12 @@ import kotlinx.serialization.Serializable
 data class AiRecommendation(
     val categoria: String? = null,
     val titulo: String,
-    val recomendacion: String
+    val recomendacion: String,
+    // Módulo 12 — para que el plan sea claro y medible: QUÉ debe mejorar y
+    // CÓMO se va a notar en el próximo corte. Con default "" para que planes
+    // viejos (guardados sin estos campos) sigan decodificando.
+    val objetivo: String = "",
+    val indicador: String = ""
 ) {
     // `categoria` es el `key` de RatingCategory (ver Rating.kt) cuando la
     // recomendación es sobre una categoría puntual, o null cuando es un
@@ -29,5 +34,8 @@ data class AiRecommendation(
 
 @Serializable
 data class AiRecommendationsResponse(
-    val recommendations: List<AiRecommendation> = emptyList()
+    val recommendations: List<AiRecommendation> = emptyList(),
+    // false = todavía hay pocas evaluaciones y lo que viene es solo un aviso:
+    // no se ofrece "Aceptar plan" para eso.
+    val suficiente: Boolean = true
 )

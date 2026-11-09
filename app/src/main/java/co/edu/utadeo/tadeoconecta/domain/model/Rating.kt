@@ -124,6 +124,29 @@ object RecommendFor {
 
 // Datos rápidos: hechos neutrales (no "buenos" ni "malos") que se muestran
 // como % de reseñas que los marcaron, no como estrellas.
+// Asistencia declarada por el estudiante al evaluar (Módulo 12). Son RANGOS,
+// no un número exacto, para que sea fácil contestar con honestidad. El rango
+// decide cuánto PESA esa reseña en los promedios del profesor: quien casi no
+// fue a clase no debería mover el promedio igual que quien sí fue. La clave
+// "minima" se guarda pero pesa 0: no entra en promedios ni se muestra su
+// comentario. Las reseñas viejas (attendance_band null) pesan 1.0.
+object AttendanceBands {
+    val labels = linkedMapOf(
+        "alta" to "Casi siempre (90–100 % de las clases)",
+        "media" to "La mayoría (70–89 %)",
+        "baja" to "Aproximadamente la mitad (40–69 %)",
+        "minima" to "Pocas clases (menos del 40 %)"
+    )
+
+    fun weight(band: String?): Double = when (band) {
+        "alta" -> 1.0
+        "media" -> 0.75
+        "baja" -> 0.4
+        "minima" -> 0.0
+        else -> 1.0
+    }
+}
+
 object RatingFacts {
     val workloadLabels = mapOf("poca" to "Poca carga fuera de clase", "moderada" to "Carga moderada", "alta" to "Mucha carga fuera de clase")
     val gradingBasisLabels = mapOf("examenes" to "Exámenes", "trabajos" to "Trabajos y proyectos", "participacion" to "Participación en clase")
@@ -206,6 +229,8 @@ data class ProfessorRatingInsert(
     val recommend_for: List<String>,
     val workload: String,
     val attendance_mandatory: Boolean,
+    // Sin valor por defecto a propósito: siempre viaja en el upsert.
+    val attendance_band: String,
     val grading_basis: String,
     val allows_review_of_exams: Boolean,
     val class_style: String,
@@ -231,6 +256,7 @@ data class ProfessorRatingRow(
     val recommend_for: List<String> = emptyList(),
     val workload: String,
     val attendance_mandatory: Boolean,
+    val attendance_band: String? = null,
     val grading_basis: String,
     val allows_review_of_exams: Boolean,
     val class_style: String,
@@ -310,7 +336,10 @@ data class ProfessorFeedbackNote(
     val wouldRecommend: Boolean,
     val recommendReason: String,
     val tipComment: String,
-    val hardestPartComment: String
+    val hardestPartComment: String,
+    // Asistencia que declaró quien escribió esto (ver AttendanceBands) — el
+    // profesor la ve junto al comentario para leerlo con ese contexto.
+    val attendanceBand: String? = null
 )
 
 // Módulo 09 — el "objetivo activo" del plan de mejora, persistido en

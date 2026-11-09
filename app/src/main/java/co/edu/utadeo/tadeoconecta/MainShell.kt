@@ -60,9 +60,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -85,6 +88,10 @@ import co.edu.utadeo.tadeoconecta.catalog.FacultyCareerSubjectPicker
 import co.edu.utadeo.tadeoconecta.domain.model.AiRecommendation
 import co.edu.utadeo.tadeoconecta.domain.model.AiReportVerdict
 import co.edu.utadeo.tadeoconecta.domain.model.AppRole
+import co.edu.utadeo.tadeoconecta.domain.model.ImprovementPlanRow
+import co.edu.utadeo.tadeoconecta.domain.model.MIN_NEW_REVIEWS_FOR_COMPARISON
+import co.edu.utadeo.tadeoconecta.domain.model.IMPROVEMENT_THRESHOLD
+import co.edu.utadeo.tadeoconecta.domain.model.PlanProgress
 import co.edu.utadeo.tadeoconecta.domain.model.Career
 import co.edu.utadeo.tadeoconecta.domain.model.CategoryBreakdown
 import co.edu.utadeo.tadeoconecta.domain.model.Faculty
@@ -120,6 +127,7 @@ import co.edu.utadeo.tadeoconecta.rating.RatingUiState
 import co.edu.utadeo.tadeoconecta.rating.RatingViewModel
 import co.edu.utadeo.tadeoconecta.rating.StepModerationResult
 import co.edu.utadeo.tadeoconecta.rating.TextQuality
+import co.edu.utadeo.tadeoconecta.domain.model.AttendanceBands
 import co.edu.utadeo.tadeoconecta.rating.isValidComment
 import co.edu.utadeo.tadeoconecta.search.SearchError
 import co.edu.utadeo.tadeoconecta.search.SearchScreen
@@ -370,7 +378,14 @@ private fun ProfessorShell(profileVm: ProfileViewModel, notificationsVm: Notific
                                 state = dashState,
                                 onBack = { tab = ProfessorTab.Home },
                                 onEnter = { dashboardVm.ensureAiRecommendations() },
-                                onGenerateAi = { dashboardVm.generateAiRecommendations() }
+                                onGenerateAi = { dashboardVm.generateAiRecommendations() },
+                                onAcceptPlan = { dashboardVm.acceptPlan() },
+                                onDiscardDraft = { dashboardVm.discardDraft() },
+                                onOpenUpdate = { dashboardVm.openUpdateDialog() },
+                                onCloseUpdate = { dashboardVm.closeUpdateDialog() },
+                                onUpdateWithReason = { reason -> dashboardVm.generateAiRecommendations(reason) },
+                                onToggleApplied = { index -> dashboardVm.toggleApplied(index) },
+                                onCloseCut = { dashboardVm.closeCut() }
                             )
                             else -> Unit
                         }
@@ -910,24 +925,40 @@ private fun ProfessorImprove(
     state: ProfessorDashboardUiState,
     onBack: () -> Unit,
     onEnter: () -> Unit,
-    onGenerateAi: () -> Unit
+    onGenerateAi: () -> Unit,
+    onAcceptPlan: () -> Unit,
+    onDiscardDraft: () -> Unit,
+    onOpenUpdate: () -> Unit,
+    onCloseUpdate: () -> Unit,
+    onUpdateWithReason: (String) -> Unit,
+    onToggleApplied: (Int) -> Unit,
+    onCloseCut: () -> Unit
 ) {
-    // A pedido de Juan: el plan se genera solo apenas el profesor entra a
-    // "Mejorar", sin tener que tocar un botón. ensureAiRecommendations()
-    // no vuelve a llamar a la IA si ya hay recomendaciones en esta sesión
-    // (ni si ya se intentó y falló: ahí el profesor decide con "Reintentar").
+    // A pedido de Juan: el plan se propone solo apenas el profesor entra a
+    // "Mejorar", sin tener que tocar un botón. ensureAiRecommendations() no
+    // genera nada si ya hay un plan aceptado, ni si ya hay una propuesta en
+    // esta sesión (ni si ya se intentó y falló: ahí usa "Reintentar").
     LaunchedEffect(Unit) { onEnter() }
     ScreenColumn {
         TopBar("Plan de mejora", onBack)
-        GuideCard(R.drawable.cabito_encourage, "Convierte resultados en acciones.", "Un plan a partir de lo que tus estudiantes dijeron este periodo.")
-        // Recomendaciones GENERADAS POR IA a partir de los resultados reales
-        // de este profesor (Gemini, vía la Edge Function
-        // generate-improvement-recommendations). Antes, debajo había un
-        // "Plan paso a paso" fijo por categoría (ProfessorTips) con
-        // "Marcar como objetivo" y un historial de metas; Juan pidió quitarlo
-        // porque repetía lo mismo que la IA ya hace mejor. Si la IA falla,
-        // la tarjeta muestra el error y un botón para reintentar.
-        AiRecommendationsPanel(state, onGenerateAi)
+        GuideCard(R.drawable.cabito_encourage, "Convierte resultados en acciones.", "Un plan a partir de lo que tus estudiantes dijeron. Acéptalo y en el próximo corte vemos si mejoraste.")
+        // Módulo 12 — el plan se PROPONE, el profesor lo ACEPTA y queda como su
+        // objetivo del corte (con las evaluaciones nuevas se compara si de
+        // verdad mejoró). Al actualizarlo debe decir por qué. Todo plan
+        // aceptado, cerrado o reemplazado queda en el historial.
+        AiRecommendationsPanel(
+            state = state,
+            onRetry = onGenerateAi,
+            onAccept = onAcceptPlan,
+            onDiscard = onDiscardDraft,
+            onOpenUpdate = onOpenUpdate,
+            onToggleApplied = onToggleApplied,
+            onCloseCut = onCloseCut
+        )
+        PlanHistoryCard(state.planHistory)
+    }
+    if (state.updateDialogOpen) {
+        PlanUpdateDialog(onConfirm = onUpdateWithReason, onDismiss = onCloseUpdate)
     }
 }
 
@@ -967,6 +998,13 @@ private fun ProfessorFeedbackCard(note: ProfessorFeedbackNote, verdict: AiReport
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold
                 )
+            }
+        }
+        // Módulo 12 — contexto para leer el comentario: cuánta clase vio quien
+        // lo escribió (la reseña ya pesa en el promedio según esto).
+        note.attendanceBand?.let { band ->
+            AttendanceBands.labels[band]?.let { label ->
+                Text("Asistencia declarada: $label", color = TadeoMuted, fontSize = 10.5.sp, modifier = Modifier.padding(top = 5.dp))
             }
         }
         if (verdict != null) {
@@ -1374,60 +1412,122 @@ private fun AnswerCard(text: String, selected: Boolean, modifier: Modifier = Mod
     }
 }
 
-// Campo de texto obligatorio con mínimo de PALABRAS (antes era de
-// caracteres — ver el comentario de MIN_COMMENT_WORDS en RatingViewModel
-// sobre por qué se cambió la unidad y por qué cada mínimo es distinto) —
-// se usa para las notas de justificación de una tarjeta mal calificada, el
-// motivo de la recomendación, y las dos preguntas guía del final. Cada uno
-// pide un mínimo distinto (minWords), así que no está fijo — ver
-// MIN_COMMENT_WORDS / MIN_RECOMMEND_REASON_WORDS / MIN_TIP_WORDS en
-// RatingViewModel. El error solo se marca después del primer intento de
-// enviar (showValidation), no desde que el campo está vacío por default.
+// Campo de texto obligatorio con mínimo (y tope) de PALABRAS. El contador es
+// "estilo X": en vez de un "25/25" seco, hay un anillo que se llena hacia el
+// tope y un mensaje que cambia según el estado —
+//   · rojo   → todavía no llegas al mínimo ("Escribe mínimo N palabras…").
+//   · verde  → ya cumples el mínimo; "puedes escribir hasta M palabras".
+//   · ámbar  → te estás acercando al tope ("te quedan K palabras").
+//   · rojo   → llegaste al tope; no se acepta más texto.
+// El tope se aplica al escribir/pegar: si un cambio lo pasaría, se ignora.
+// Cada campo pide un mínimo distinto (minWords) — ver MIN_COMMENT_WORDS /
+// MIN_RECOMMEND_REASON_WORDS / MIN_TIP_WORDS en RatingViewModel. maxWords
+// por defecto es 4 veces el mínimo (un comentario largo pero no un ensayo).
 @Composable
-private fun RequiredMultilineField(value: String, onValue: (String) -> Unit, hint: String, showValidation: Boolean, minWords: Int = MIN_COMMENT_WORDS) {
+private fun RequiredMultilineField(
+    value: String,
+    onValue: (String) -> Unit,
+    hint: String,
+    showValidation: Boolean,
+    minWords: Int = MIN_COMMENT_WORDS,
+    maxWords: Int = minWords * 4
+) {
     val trimmedValue = value.trim()
     val wordCount = TextQuality.wordCount(trimmedValue)
     val tooShort = wordCount < minWords
-    // Revisión general — a pedido de Juan: ya no basta con llegar al
-    // mínimo de palabras, el texto también tiene que parecer un
-    // comentario real (ver TextQuality). Solo se evalúa cuando YA se pasó
-    // el mínimo, para no mostrar los dos avisos a la vez mientras la
-    // persona todavía está escribiendo.
+    val atLimit = wordCount >= maxWords
+    val nearLimit = !atLimit && wordCount >= (maxWords * 0.85).toInt()
+    // Solo se evalúa cuando YA se pasó el mínimo, para no mostrar dos avisos
+    // a la vez mientras la persona todavía está escribiendo.
     val notMeaningful = !tooShort && !TextQuality.isMeaningful(trimmedValue)
     val invalid = tooShort || notMeaningful
-    // Revisión general: el wizard deja "Continuar" deshabilitado hasta que
-    // el paso esté completo, así que en la práctica NUNCA se llega a
-    // enviar con un campo corto — showValidation nunca termina
-    // prendiéndose sola (ver RatingViewModel.submit()). Avisar solo
-    // después de un envío que no va a pasar deja a la persona sin ninguna
-    // pista de cuánto le falta mientras escribe, así que el aviso (y el
-    // contador de palabras) también se prenden en cuanto hay texto.
     val showHint = showValidation || value.isNotEmpty()
+    val red = Color(0xFFE05B4E)
+    val green = Color(0xFF2FBE79)
+    val amber = Color(0xFFE8A317)
+    val statusColor = when {
+        atLimit -> red
+        tooShort -> red
+        nearLimit -> amber
+        else -> green
+    }
+    val statusText = when {
+        atLimit -> "Llegaste al límite de $maxWords palabras."
+        tooShort && wordCount == 0 -> "Siempre debes escribir mínimo $minWords palabras."
+        tooShort -> "Mínimo $minWords palabras · te faltan ${minWords - wordCount}."
+        nearLimit -> "Te quedan ${maxWords - wordCount} palabras."
+        else -> "Listo, ya cumples el mínimo. Puedes escribir hasta $maxWords palabras."
+    }
     val shape = RoundedCornerShape(14.dp)
     Column(Modifier.fillMaxWidth()) {
         Box(
             Modifier.fillMaxWidth().heightIn(min = 72.dp).glassPill(shape)
-                .then(if (showHint && invalid) Modifier.border(1.5.dp, Color(0xFFE05B4E), shape) else Modifier)
+                .then(if (showHint && invalid) Modifier.border(1.5.dp, red, shape) else Modifier)
                 .padding(horizontal = 13.dp, vertical = 10.dp)
         ) {
             BasicTextField(
                 value = value,
-                onValueChange = onValue,
+                onValueChange = { new ->
+                    // Se acepta el cambio si no pasa el tope, o si el texto
+                    // se está acortando (borrar siempre debe poder).
+                    if (TextQuality.wordCount(new) <= maxWords || new.length < value.length) onValue(new)
+                },
                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = TadeoInk, fontSize = 12.5.sp),
                 modifier = Modifier.fillMaxWidth(),
                 decorationBox = { inner -> if (value.isEmpty()) Text(hint, color = TadeoMuted, fontSize = 12.5.sp); inner() }
             )
         }
-        Text(
-            "$wordCount/$minWords palabras",
-            color = if (tooShort) Color(0xFFE05B4E) else Color(0xFF2FBE79),
-            fontSize = 10.5.sp,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.End,
-            modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-        )
-        if (showHint && tooShort) ProfileInlineError("Cuéntanos un poco más (mínimo $minWords palabras).")
-        else if (showHint && notMeaningful) ProfileInlineError("Esto no parece un comentario real — cuéntanos con tus palabras qué pasó.")
+        Row(
+            Modifier.fillMaxWidth().padding(top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                statusText,
+                color = statusColor,
+                fontSize = 11.sp,
+                lineHeight = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(8.dp))
+            WordCountRing(count = wordCount, minWords = minWords, maxWords = maxWords, color = statusColor)
+        }
+        if (showHint && notMeaningful) ProfileInlineError("Esto no parece un comentario real — cuéntanos con tus palabras qué pasó.")
+    }
+}
+
+// Anillo de progreso del contador de palabras: se llena de 0 al tope; una
+// marquita sobre el aro señala dónde queda el mínimo, y dentro del anillo se
+// muestra cuántas palabras faltan para el mínimo (o cuántas quedan del tope).
+@Composable
+private fun WordCountRing(count: Int, minWords: Int, maxWords: Int, color: Color) {
+    val progress = (count.toFloat() / maxWords).coerceIn(0f, 1f)
+    val minFraction = (minWords.toFloat() / maxWords).coerceIn(0f, 1f)
+    val track = Color(0xFFD9DEE7)
+    Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.fillMaxSize()) {
+            val stroke = 3.dp.toPx()
+            val inset = stroke / 2f
+            val arcSize = Size(size.width - stroke, size.height - stroke)
+            val topLeft = Offset(inset, inset)
+            drawArc(track, -90f, 360f, false, topLeft, arcSize, style = Stroke(stroke))
+            drawArc(color, -90f, 360f * progress, false, topLeft, arcSize, style = Stroke(stroke, cap = StrokeCap.Round))
+            // Marca del mínimo.
+            val angle = Math.toRadians((-90.0 + 360.0 * minFraction))
+            val r = size.width / 2f
+            val cx = size.width / 2f
+            val cy = size.height / 2f
+            val inner = r - stroke - 1.dp.toPx()
+            val outer = r + 0.5.dp.toPx()
+            drawLine(
+                Color(0xFF5B6575),
+                Offset(cx + (inner * Math.cos(angle)).toFloat(), cy + (inner * Math.sin(angle)).toFloat()),
+                Offset(cx + (outer * Math.cos(angle)).toFloat(), cy + (outer * Math.sin(angle)).toFloat()),
+                strokeWidth = 1.5.dp.toPx()
+            )
+        }
+        val label = if (count < minWords) (minWords - count).toString() else if (count >= maxWords) "0" else (maxWords - count).toString()
+        Text(label, color = color, fontSize = 8.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -1556,6 +1656,8 @@ private sealed class RatingStep {
     object GradingBasis : RatingStep()
     object ClassStyle : RatingStep()
     object Attendance : RatingStep()
+    // Módulo 12 — asistencia declarada (rangos); va al principio.
+    object AttendanceLevel : RatingStep()
     object ExamReview : RatingStep()
     object TipComment : RatingStep()
     object HardestPart : RatingStep()
@@ -1566,6 +1668,7 @@ private fun buildRatingSteps(professorName: String, form: RatingFormState): List
         "Evaluemos a $professorName",
         "Para cada pregunta, elige la tarjeta que más se parezca a tu experiencia — solo vas a escribir donde de verdad importa."
     ))
+    add(RatingStep.AttendanceLevel)
     add(RatingStep.Category(RatingCategory.CLARITY))
     add(RatingStep.Category(RatingCategory.ORGANIZATION))
     add(RatingStep.Category(RatingCategory.FAIRNESS))
@@ -1610,6 +1713,7 @@ private fun isRatingStepComplete(step: RatingStep, form: RatingFormState): Boole
     RatingStep.GradingBasis -> form.gradingBasis != null
     RatingStep.ClassStyle -> form.classStyle != null
     RatingStep.Attendance -> form.attendanceMandatory != null
+    RatingStep.AttendanceLevel -> form.attendanceBand != null
     RatingStep.ExamReview -> form.allowsReviewOfExams != null
     RatingStep.TipComment -> isValidComment(form.tipComment, MIN_TIP_WORDS)
     RatingStep.HardestPart -> isValidComment(form.hardestPartComment, MIN_COMMENT_WORDS)
@@ -1666,6 +1770,29 @@ private fun RatingStepContent(step: RatingStep, form: RatingFormState, vm: Ratin
         RatingStep.GradingBasis -> FactPicker("¿La nota depende más de…?", RatingFacts.gradingBasisLabels, form.gradingBasis, form.showValidation) { vm.setGradingBasis(it) }
         RatingStep.ClassStyle -> FactPicker("Estilo de clase", RatingFacts.classStyleLabels, form.classStyle, form.showValidation) { vm.setClassStyle(it) }
         RatingStep.Attendance -> BoolFactPicker("¿Asistencia obligatoria?", form.attendanceMandatory, form.showValidation) { vm.setAttendanceMandatory(it) }
+        RatingStep.AttendanceLevel -> Column(Modifier.fillMaxWidth()) {
+            Text(
+                "Cuéntanos cuál fue tu porcentaje total de asistencia a clase",
+                fontWeight = FontWeight.Bold, fontSize = 16.sp, lineHeight = 21.sp
+            )
+            Text(
+                "Responde con sinceridad: así cada evaluación cuenta según cuánta clase vio quien la escribe, y las opiniones de quienes sí asisten tienen más peso.",
+                color = TadeoMuted, fontSize = 11.5.sp, lineHeight = 16.sp,
+                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
+            )
+            AttendanceBands.labels.forEach { (key, label) ->
+                AnswerCard(label, form.attendanceBand == key) { vm.setAttendanceBand(key) }
+            }
+            if (form.showValidation && form.attendanceBand == null) ProfileInlineError("Elige una opción.")
+            if (form.attendanceBand == "minima") {
+                Surface(color = Color(0xFFFFF7E6), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                    Text(
+                        "Con menos del 40 % de asistencia puedes dejar tu evaluación y la guardamos, pero no cuenta en el promedio del profesor ni se muestra su comentario, porque no viste suficiente clase para juzgarla.",
+                        color = TadeoInk, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.padding(11.dp)
+                    )
+                }
+            }
+        }
         RatingStep.ExamReview -> BoolFactPicker("¿Permite revisar o reclamar parciales?", form.allowsReviewOfExams, form.showValidation) { vm.setAllowsReviewOfExams(it) }
         RatingStep.TipComment -> Column(Modifier.fillMaxWidth()) {
             Text("¿Qué deberías saber antes de tomar esta clase?", fontWeight = FontWeight.Bold, fontSize = 16.sp, lineHeight = 21.sp)
@@ -1721,6 +1848,16 @@ private fun RatingFormScreen(professor: ProfessorPreview, state: RatingUiState, 
         RatingStep.RecommendReason -> form.recommendReason.takeIf { it.isNotBlank() }
         RatingStep.TipComment -> form.tipComment.takeIf { it.isNotBlank() }
         RatingStep.HardestPart -> form.hardestPartComment.takeIf { it.isNotBlank() }
+        else -> null
+    }
+    // Módulo 12 — la pregunta exacta que el estudiante está contestando en
+    // este paso: la IA la usa para juzgar si la respuesta tiene sentido.
+    val stepQuestion: String? = when (step) {
+        is RatingStep.Category -> "Justifica tu respuesta a esta pregunta sobre el profesor: ${step.category.question}"
+        RatingStep.RecommendReason ->
+            if (form.wouldRecommend == true) "¿Por qué sí lo recomendarías?" else "¿Por qué no lo recomendarías?"
+        RatingStep.TipComment -> "¿Qué deberías saber antes de tomar esta clase?"
+        RatingStep.HardestPart -> "¿Qué fue lo más difícil del curso?"
         else -> null
     }
 
@@ -1781,7 +1918,7 @@ private fun RatingFormScreen(professor: ProfessorPreview, state: RatingUiState, 
                     stepBlockedReason = null
                     stepChecking = true
                     scope.launch {
-                        when (val result = vm.moderateStepText(stepText)) {
+                        when (val result = vm.moderateStepText(stepText, stepQuestion, form.attendanceBand?.let { AttendanceBands.labels[it] })) {
                             is StepModerationResult.Clean -> { stepChecking = false; stepIndex = clamped + 1 }
                             is StepModerationResult.Blocked -> { stepChecking = false; stepBlockedReason = result.reason }
                             // Fail-open: un error técnico (sin red, Gemini caído) no
@@ -2908,11 +3045,23 @@ private data class TrendDelta(val icon: ImageVector, val color: Color, val bg: C
     }
 }
 
-// Tarjeta de recomendaciones de IA — a propósito NO usa CardSurface (el
-// mismo fondo de vidrio blanco que cualquier otra tarjeta): lleva su propio
-// fondo en degradado azul→aqua para que se lea como sección aparte desde el
-// primer vistazo, con o sin recomendaciones ya generadas.
-@Composable private fun AiRecommendationsPanel(state: ProfessorDashboardUiState, onGenerateAi: () -> Unit) {
+// Tarjeta del plan de mejora — a propósito NO usa CardSurface (el mismo
+// fondo de vidrio blanco que cualquier otra tarjeta): lleva su propio fondo
+// en degradado azul→aqua para que se lea como sección aparte desde el primer
+// vistazo. Tiene tres modos: propuesta (borrador por aceptar), plan aceptado
+// (con avance del corte) y cargando/error.
+@Composable private fun AiRecommendationsPanel(
+    state: ProfessorDashboardUiState,
+    onRetry: () -> Unit,
+    onAccept: () -> Unit,
+    onDiscard: () -> Unit,
+    onOpenUpdate: () -> Unit,
+    onToggleApplied: (Int) -> Unit,
+    onCloseCut: () -> Unit
+) {
+    val plan = state.activePlan
+    val draft = state.aiRecommendations
+    var confirmClose by remember { mutableStateOf(false) }
     Box(
         Modifier
             .fillMaxWidth()
@@ -2928,48 +3077,84 @@ private data class TrendDelta(val icon: ImageVector, val color: Color, val bg: C
                 }
                 Text("TU PLAN DE MEJORA", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 0.75.sp, modifier = Modifier.padding(start = 8.dp))
             }
-            Text("Basado en lo que dijeron tus estudiantes", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 6.dp))
+            val subtitle = when {
+                state.aiLoading -> "Basado en lo que dijeron tus estudiantes"
+                draft.isNotEmpty() && state.aiSufficient -> "Propuesta de plan: revísala y acéptala"
+                draft.isNotEmpty() -> "Basado en lo que dijeron tus estudiantes"
+                plan != null -> "Plan aceptado el ${shortDate(plan.accepted_at)}"
+                else -> "Basado en lo que dijeron tus estudiantes"
+            }
+            Text(subtitle, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 6.dp))
             when {
                 state.aiLoading -> Row(Modifier.fillMaxWidth().padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                     GlassSpinner(size = 28.dp, strokeWidth = 3.dp)
                     Text("Preparando tu plan de mejora…", color = Color.White.copy(alpha = 0.9f), fontSize = 11.5.sp, modifier = Modifier.padding(start = 10.dp))
                 }
-                state.aiRecommendations.isNotEmpty() -> {
-                    state.aiRecommendations.forEachIndexed { index, rec ->
-                        Surface(color = Color.White.copy(alpha = 0.14f), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
-                            Row(Modifier.padding(12.dp)) {
-                                Box(Modifier.size(22.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.22f)), contentAlignment = Alignment.Center) {
-                                    Text("${index + 1}", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
-                                }
-                                Column(Modifier.padding(start = 10.dp).weight(1f)) {
-                                    rec.category?.let {
-                                        Text(it.shortLabel.uppercase(), color = Color.White.copy(alpha = 0.75f), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
-                                    }
-                                    Text(rec.titulo, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 2.dp))
-                                    Text(rec.recomendacion, color = Color.White.copy(alpha = 0.92f), fontSize = 11.5.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp))
+                // --- Propuesta (borrador): todavía NO está guardada ---
+                draft.isNotEmpty() -> {
+                    state.aiUpdateReason?.let {
+                        Text("Actualizado porque: “$it”", color = Color.White.copy(alpha = 0.85f), fontSize = 10.5.sp, lineHeight = 14.sp, modifier = Modifier.padding(top = 6.dp))
+                    }
+                    draft.forEachIndexed { index, rec -> PlanRecCard(index, rec, applied = null, onToggle = null) }
+                    if (state.aiSufficient) {
+                        Text(
+                            "Al aceptar, este plan queda guardado como tu objetivo para el próximo corte y lo comparamos con las evaluaciones nuevas.",
+                            color = Color.White.copy(alpha = 0.9f), fontSize = 10.5.sp, lineHeight = 14.sp, modifier = Modifier.padding(top = 12.dp, bottom = 8.dp)
+                        )
+                        PlanPrimaryButton(
+                            text = when {
+                                state.planSaving -> "Guardando…"
+                                plan != null -> "Aceptar y reemplazar mi plan actual"
+                                else -> "Aceptar este plan"
+                            },
+                            enabled = !state.planSaving,
+                            onClick = onAccept
+                        )
+                        Row(Modifier.padding(top = 2.dp)) {
+                            TextButton(onClick = onOpenUpdate, enabled = !state.planSaving, contentPadding = PaddingValues(0.dp)) {
+                                Text("Actualizar plan →", color = Color.White, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (plan != null) {
+                                Spacer(Modifier.width(16.dp))
+                                TextButton(onClick = onDiscard, enabled = !state.planSaving, contentPadding = PaddingValues(0.dp)) {
+                                    Text("Descartar", color = Color.White.copy(alpha = 0.85f), fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
                     }
-                    TextButton(onClick = onGenerateAi, contentPadding = PaddingValues(0.dp), modifier = Modifier.padding(top = 10.dp)) {
-                        Text("Actualizar plan →", color = Color.White, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
-                    }
-                    // Si "Generar de nuevo" falla, se conservan las anteriores y
-                    // solo se avisa debajo.
-                    if (state.aiError != null) {
-                        Text(state.aiError, color = Color.White, fontSize = 10.5.sp)
-                    }
+                    state.planError?.let { Text(it, color = Color.White, fontSize = 10.5.sp, modifier = Modifier.padding(top = 4.dp)) }
+                    state.aiError?.let { Text(it, color = Color.White, fontSize = 10.5.sp, modifier = Modifier.padding(top = 4.dp)) }
                 }
-                // Ahora el plan se genera solo al entrar a "Mejorar" (ver
-                // ProfessorImprove), así que ya no hay botón de "Generar": si
-                // no hay recomendaciones y no está cargando, es porque falló
-                // (se muestra el error con "Reintentar") o porque la carga
-                // automática está por arrancar en este mismo instante.
+                // --- Plan aceptado: avance del corte ---
+                plan != null -> {
+                    plan.update_reason?.let {
+                        Text("Actualizado porque: “$it”", color = Color.White.copy(alpha = 0.85f), fontSize = 10.5.sp, lineHeight = 14.sp, modifier = Modifier.padding(top = 6.dp))
+                    }
+                    plan.recommendations.forEachIndexed { index, rec ->
+                        PlanRecCard(index, rec, applied = plan.applied.getOrElse(index) { false }, onToggle = { onToggleApplied(index) })
+                    }
+                    PlanProgressBlock(state.planProgress)
+                    Row(Modifier.padding(top = 10.dp)) {
+                        TextButton(onClick = onOpenUpdate, enabled = !state.planSaving, contentPadding = PaddingValues(0.dp)) {
+                            Text("Actualizar plan →", color = Color.White, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    PlanPrimaryButton(
+                        text = if (state.planSaving) "Guardando…" else "Cerrar corte y guardar resultado",
+                        enabled = !state.planSaving,
+                        onClick = { confirmClose = true }
+                    )
+                    state.planError?.let { Text(it, color = Color.White, fontSize = 10.5.sp, modifier = Modifier.padding(top = 4.dp)) }
+                    state.aiError?.let { Text(it, color = Color.White, fontSize = 10.5.sp, modifier = Modifier.padding(top = 4.dp)) }
+                }
+                // Ya no hay botón de "Generar": si no hay propuesta ni plan y no
+                // está cargando, es porque falló (error + "Reintentar") o porque
+                // la carga automática está por arrancar en este mismo instante.
                 state.aiError != null -> {
                     Text(state.aiError, color = Color.White.copy(alpha = 0.92f), fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 8.dp, bottom = 12.dp))
                     Surface(
                         color = Color.White, shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth().clickable(onClick = onGenerateAi)
+                        modifier = Modifier.fillMaxWidth().clickable(onClick = onRetry)
                     ) {
                         Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.Lightbulb, contentDescription = null, tint = TadeoBlue, modifier = Modifier.size(16.dp))
@@ -2980,6 +3165,202 @@ private data class TrendDelta(val icon: ImageVector, val color: Color, val bg: C
                 else -> Row(Modifier.fillMaxWidth().padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                     GlassSpinner(size = 28.dp, strokeWidth = 3.dp)
                     Text("Preparando tu plan de mejora…", color = Color.White.copy(alpha = 0.9f), fontSize = 11.5.sp, modifier = Modifier.padding(start = 10.dp))
+                }
+            }
+        }
+    }
+    if (confirmClose) {
+        AlertDialog(
+            onDismissRequest = { confirmClose = false },
+            title = { Text("¿Cerrar este corte?", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            text = {
+                Text(
+                    "Guardamos en tu historial el resultado de este plan (qué acciones aplicaste y cómo cambiaron tus promedios con las evaluaciones nuevas) y te proponemos un plan nuevo para el siguiente corte. El historial no se borra.",
+                    fontSize = 12.sp, lineHeight = 17.sp
+                )
+            },
+            confirmButton = { TextButton(onClick = { confirmClose = false; onCloseCut() }) { Text("Cerrar corte", fontWeight = FontWeight.Bold) } },
+            dismissButton = { TextButton(onClick = { confirmClose = false }) { Text("Cancelar") } }
+        )
+    }
+}
+
+// "9 nov 2026" a partir de un timestamp ISO ("2026-11-09T…").
+private fun shortDate(iso: String?): String {
+    val parts = iso?.take(10)?.split("-") ?: return "—"
+    val year = parts.getOrNull(0) ?: return "—"
+    val month = parts.getOrNull(1)?.toIntOrNull()?.let { MONTH_LABELS.getOrNull(it - 1) } ?: return "—"
+    val day = parts.getOrNull(2)?.toIntOrNull() ?: return "—"
+    return "$day ${month.lowercase()} $year"
+}
+
+@Composable private fun PlanField(label: String, text: String) {
+    Column(Modifier.padding(top = 6.dp)) {
+        Text(label.uppercase(), color = Color.White.copy(alpha = 0.7f), fontSize = 8.5.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp)
+        Text(text, color = Color.White.copy(alpha = 0.94f), fontSize = 11.5.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 1.dp))
+    }
+}
+
+// Una acción del plan: categoría, título, QUÉ mejorar, QUÉ hacer y CÓMO se va
+// a medir. En el plan aceptado además lleva "Ya lo apliqué" (applied != null).
+@Composable private fun PlanRecCard(index: Int, rec: AiRecommendation, applied: Boolean?, onToggle: (() -> Unit)?) {
+    Surface(color = Color.White.copy(alpha = 0.14f), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+        Row(Modifier.padding(12.dp)) {
+            Box(Modifier.size(22.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.22f)), contentAlignment = Alignment.Center) {
+                Text("${index + 1}", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+            }
+            Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                rec.category?.let {
+                    Text(it.shortLabel.uppercase(), color = Color.White.copy(alpha = 0.75f), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+                }
+                Text(rec.titulo, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 2.dp))
+                if (rec.objetivo.isNotBlank()) PlanField("Qué vamos a mejorar", rec.objetivo)
+                PlanField("Qué hacer", rec.recomendacion)
+                if (rec.indicador.isNotBlank()) PlanField("Cómo lo vamos a medir", rec.indicador)
+                if (applied != null && onToggle != null) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 6.dp).clickable(onClick = onToggle),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = applied,
+                            onCheckedChange = { onToggle() },
+                            colors = CheckboxDefaults.colors(checkedColor = Color.White, uncheckedColor = Color.White, checkmarkColor = TadeoBlue)
+                        )
+                        Text("Ya lo apliqué", color = Color.White, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Cómo van los promedios de las categorías del plan con las evaluaciones que
+// llegaron DESPUÉS de aceptarlo (el "siguiente corte").
+@Composable private fun PlanProgressBlock(progress: PlanProgress?) {
+    if (progress == null) return
+    Surface(color = Color.White.copy(alpha = 0.18f), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text("AVANCE DE ESTE CORTE", color = Color.White.copy(alpha = 0.75f), fontSize = 9.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 0.6.sp)
+            Text(
+                "Evaluaciones nuevas desde que aceptaste el plan: ${progress.newReviews}",
+                color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 3.dp)
+            )
+            if (!progress.enough) {
+                Text(
+                    "Cuando lleguen al menos $MIN_NEW_REVIEWS_FOR_COMPARISON evaluaciones nuevas vas a ver aquí si mejoraste en lo que te propusiste.",
+                    color = Color.White.copy(alpha = 0.88f), fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.padding(top = 4.dp)
+                )
+            } else {
+                progress.deltas.forEach { delta ->
+                    val change = delta.change
+                    val mark = when {
+                        change == null -> "—"
+                        change >= IMPROVEMENT_THRESHOLD -> "▲ mejoró"
+                        change <= -IMPROVEMENT_THRESHOLD -> "▼ bajó"
+                        else -> "= igual"
+                    }
+                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(delta.category.shortLabel, color = Color.White, fontSize = 11.5.sp, modifier = Modifier.weight(1f))
+                        Text(
+                            if (delta.before != null && delta.after != null) String.format("%.1f → %.1f  %s", delta.before, delta.after, mark) else mark,
+                            color = Color.White, fontSize = 11.5.sp, fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun PlanPrimaryButton(text: String, enabled: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = if (enabled) Color.White else Color.White.copy(alpha = 0.55f),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp).then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+    ) {
+        Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+            Text(text, color = TadeoBlue, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        }
+    }
+}
+
+// Pide el MOTIVO para actualizar el plan: eso (y el plan anterior) se le manda
+// a la IA para que el nuevo plan atienda lo que le faltó al profesor.
+@Composable private fun PlanUpdateDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var reason by remember { mutableStateOf("") }
+    val trimmed = reason.trim()
+    val valid = trimmed.length >= 15
+    val suggestions = listOf(
+        "Ya apliqué estas acciones y quiero nuevas",
+        "Las acciones no fueron lo bastante claras",
+        "No se ajustan a mi curso o a mi forma de dar clase",
+        "Quiero un enfoque distinto"
+    )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("¿Por qué quieres actualizar el plan?", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+        text = {
+            Column {
+                Text(
+                    "Cuéntanos qué te faltó o qué no te sirvió del plan actual. Con eso preparamos uno nuevo que lo tenga en cuenta.",
+                    color = TadeoMuted, fontSize = 11.5.sp, lineHeight = 16.sp
+                )
+                Spacer(Modifier.height(8.dp))
+                suggestions.forEach { suggestion ->
+                    Surface(
+                        color = Color(0xFFEAF1FF), shape = RoundedCornerShape(50),
+                        modifier = Modifier.padding(bottom = 5.dp).clickable { reason = if (reason.isBlank()) suggestion else "$reason. $suggestion".take(400) }
+                    ) {
+                        Text(suggestion, color = TadeoBlue, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                    }
+                }
+                OutlinedTextField(
+                    value = reason,
+                    onValueChange = { if (it.length <= 400) reason = it },
+                    placeholder = { Text("Escribe aquí tu razón…", fontSize = 12.sp) },
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                )
+                Text(
+                    "${trimmed.length}/400 · escribe al menos 15 caracteres",
+                    color = if (valid) Color(0xFF2FBE79) else Color(0xFFE05B4E),
+                    fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(trimmed) }, enabled = valid) { Text("Generar plan nuevo", fontWeight = FontWeight.Bold) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+    )
+}
+
+// Historial permanente de planes: nada de lo que el profesor aceptó se
+// pierde — ni los cerrados ni los que reemplazó por uno nuevo.
+@Composable private fun PlanHistoryCard(history: List<ImprovementPlanRow>) {
+    CardSurface {
+        Text("Historial de planes", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        if (history.isEmpty()) {
+            Text(
+                "Aquí van a quedar guardados tus planes anteriores y cómo te fue en cada corte.",
+                color = TadeoMuted, fontSize = 11.5.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp)
+            )
+        } else {
+            history.forEach { plan ->
+                Column(Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                    Text(
+                        "${shortDate(plan.accepted_at)} → ${shortDate(plan.closed_at)} · " + if (plan.status == "cerrado") "Corte cerrado" else "Reemplazado por un plan nuevo",
+                        fontWeight = FontWeight.Bold, fontSize = 11.5.sp
+                    )
+                    Text(
+                        plan.recommendations.joinToString(" · ") { it.titulo },
+                        color = TadeoMuted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.padding(top = 2.dp)
+                    )
+                    plan.outcome?.verdict?.let {
+                        Text(it, color = TadeoInk, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.padding(top = 3.dp))
+                    }
+                    plan.update_reason?.let {
+                        Text("Se actualizó porque: “$it”", color = TadeoMuted, fontSize = 10.5.sp, lineHeight = 14.sp, modifier = Modifier.padding(top = 2.dp))
+                    }
                 }
             }
         }
