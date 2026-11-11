@@ -35,6 +35,19 @@ android {
         buildConfigField("String", "SUPABASE_KEY", quoted(projectSecret("SUPABASE_KEY")))
     }
 
+    // Versión "release" para demostrar/sustentar: NO es depurable, así que
+    // Android la verifica/compila al instalar y abre mucho más rápido que la
+    // de depuración (que arranca verificando clases una por una). Se firma con
+    // la llave de depuración para poder instalarla directo, sin keystore propio.
+    buildTypes {
+        release {
+            isDebuggable = false
+            isMinifyEnabled = false
+            isShrinkResources = false
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true

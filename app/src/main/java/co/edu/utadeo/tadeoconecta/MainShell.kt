@@ -1861,7 +1861,22 @@ private fun RatingFormScreen(professor: ProfessorPreview, state: RatingUiState, 
         else -> null
     }
 
-    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 18.dp, vertical = 14.dp)) {
+    // Teclado: la app dibuja de borde a borde (enableEdgeToEdge + targetSdk 35),
+    // así que `adjustResize` solo no alcanza. imePadding() sube todo el
+    // formulario sobre el teclado; además, mientras el teclado está abierto
+    // (o el texto crece) se desplaza al final para que la caja, lo que se
+    // escribe y el contador de caracteres siempre se vean.
+    val formScroll = rememberScrollState()
+    val imeVisible = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
+    val typedLength = stepText?.length ?: 0
+    LaunchedEffect(imeVisible, clamped, typedLength) {
+        if (imeVisible) {
+            kotlinx.coroutines.delay(120)
+            formScroll.animateScrollTo(formScroll.maxValue)
+        }
+    }
+
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding().padding(horizontal = 18.dp, vertical = 14.dp)) {
         Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(40.dp).glassPill(RoundedCornerShape(13.dp))
@@ -1899,7 +1914,7 @@ private fun RatingFormScreen(professor: ProfessorPreview, state: RatingUiState, 
             }
         }
         Column(
-            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+            Modifier.weight(1f).fillMaxWidth().verticalScroll(formScroll),
             verticalArrangement = Arrangement.Center
         ) { RatingStepContent(step, form, vm) }
         Spacer(Modifier.height(10.dp))
